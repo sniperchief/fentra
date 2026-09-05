@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fentra": {
+      "command": "npx",
+      "args": ["tsx", "--env-file-if-exists=.env.local", "src/mcp/server.ts"]
+    }
+  }
+}
