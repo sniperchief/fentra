@@ -275,10 +275,17 @@ function DecisionBlock({ record }: { record: TradeRecord }) {
             <Label>Execution</Label>
             <div
               className={`mt-1.5 font-mono text-[12.5px] uppercase tracking-label ${
-                decision === "ALLOW" ? "text-allow" : "text-block"
+                decision === "ALLOW" && execution?.ok ? "text-allow" : "text-block"
               }`}
             >
-              {decision === "ALLOW" ? "Submitted" : "Prevented"}
+              {/* An allowed trade the venue rejected is not a completed one. */}
+              {decision !== "ALLOW"
+                ? "Prevented"
+                : !execution
+                  ? "Not executed"
+                  : execution.ok
+                    ? "Submitted"
+                    : "Failed"}
             </div>
           </div>
         </div>
@@ -327,8 +334,12 @@ function DecisionBlock({ record }: { record: TradeRecord }) {
       {/* Execution receipt. Simulated fills are never dressed as real ones. */}
       {execution ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line px-5 py-3">
-          <Chip tone={execution.simulated ? "neutral" : "ok"}>
-            {execution.simulated ? "Simulated" : execution.venue.replace("_", " ")}
+          <Chip tone={!execution.ok ? "crit" : execution.simulated ? "neutral" : "ok"}>
+            {!execution.ok
+              ? "Not filled"
+              : execution.simulated
+                ? "Simulated"
+                : execution.venue.replace("_", " ")}
           </Chip>
           <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-ash">
             {execution.message}

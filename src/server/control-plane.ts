@@ -69,11 +69,30 @@ export interface ControlPlaneState {
 }
 
 export class ControlPlane {
+  /**
+   * Serialises submissions.
+   *
+   * Risk is evaluated against account and position state read before the
+   * order goes out, so two proposals overlapping one exchange round trip would
+   * both measure the pre-trade portfolio and both clear a limit that only one
+   * of them fits inside. Submissions therefore queue: each one evaluates
+   * against the state left by the one before it.
+   */
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(
     private readonly state: ControlPlaneState,
     private readonly executor: TradingExecutor,
     private readonly trackedSymbols: readonly string[],
   ) {}
+
+  /** Runs `task` after every previously queued submission has finished. */
+  private serialize<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(task, task);
+    // A rejected submission must not poison the queue for the next one.
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
 
   get policy(): RiskPolicy {
     return this.state.policy;
@@ -99,15 +118,20 @@ export class ControlPlane {
     const base = await this.executor.getAccountState();
     const equity = this.state.equityOverride ?? base.equity;
 
-    // First observation establishes the mark; after that it only ratchets up.
-    if (this.state.peakEquityToday === null || equity > this.state.peakEquityToday) {
+    // Only a real number may touch the high-water mark. A single unparseable
+    // reading would otherwise set the mark to NaN, and `Math.max(NaN, x)` is
+    // NaN forever after — which reads as "no drawdown" and would disable the
+    // circuit breaker for the rest of the process.
+    const usable = Number.isFinite(equity);
+    if (usable && (this.state.peakEquityToday === null || equity > this.state.peakEquityToday)) {
       this.state.peakEquityToday = equity;
     }
 
+    const mark = this.state.peakEquityToday;
     const account: AccountState = {
       ...base,
       equity,
-      peakEquityToday: Math.max(this.state.peakEquityToday, equity),
+      peakEquityToday: usable && mark !== null ? Math.max(mark, equity) : (mark ?? equity),
       tradingHalted: this.state.halted,
       haltReason: this.state.haltReason,
     };
@@ -168,6 +192,13 @@ export class ControlPlane {
   async submitProposal(
     proposal: ProposedTrade,
     opts: { agentRationale?: string } = {},
+  ): Promise<SubmitResult> {
+    return this.serialize(() => this.runProposal(proposal, opts));
+  }
+
+  private async runProposal(
+    proposal: ProposedTrade,
+    opts: { agentRationale?: string },
   ): Promise<SubmitResult> {
     const [account, positions, market] = await Promise.all([
       this.getAccountState(),

@@ -15,8 +15,8 @@ import {
   checkPositionSize,
   dailyDrawdown,
   exposureForSymbol,
+  projectedPortfolioExposure,
   signedNotional,
-  totalExposure,
 } from "./risk-rules";
 import type { RiskCheck, RiskEvaluation, RiskEvaluationInput } from "./types";
 
@@ -49,7 +49,7 @@ export function evaluateTrade(input: RiskEvaluationInput): RiskEvaluation {
   const projectedSymbolExposure = Math.abs(
     existingSymbolExposure + signedNotional(proposedTrade.side, proposedTrade.notional),
   );
-  const portfolioExposure = totalExposure(positions) + proposedTrade.notional;
+  const portfolioExposure = projectedPortfolioExposure(positions, proposedTrade);
 
   return {
     decision,
@@ -102,6 +102,14 @@ export function evaluateAccountOperation(
   }
 
   if (op.kind === "SET_LEVERAGE") {
+    // Checked before the comparison: NaN and Infinity both compare false
+    // against the limit, so an unvalidated figure would be waved through.
+    if (!Number.isInteger(op.leverage) || op.leverage < 1) {
+      return {
+        decision: "BLOCK",
+        reasons: [`${String(op.leverage)} is not a valid leverage setting for ${op.symbol}.`],
+      };
+    }
     if (op.leverage > policy.maxLeverage) {
       return {
         decision: "BLOCK",

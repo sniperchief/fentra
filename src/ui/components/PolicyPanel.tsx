@@ -97,6 +97,7 @@ export function PolicyPanel({
   const [draft, setDraft] = useState<Record<string, number>>({});
   const [mode, setMode] = useState<OrderNotionalMode>(policy.maxOrderNotionalMode);
   const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const notionalField = NOTIONAL_FIELD[mode];
   const allFields = [...FIELDS, notionalField];
@@ -134,6 +135,7 @@ export function PolicyPanel({
 
   async function save() {
     setSaving(true);
+    setFailed(false);
     const patch: Partial<RiskPolicy> = { maxOrderNotionalMode: mode };
     for (const f of allFields) {
       patch[f.key] = toStored(f, Number(draft[f.key]));
@@ -144,8 +146,13 @@ export function PolicyPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
-      const data = await res.json();
-      onSaved(data.policy);
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      // Only the server answer is adopted. A failed save leaves the panel dirty
+      // rather than displaying limits the engine is not actually enforcing.
+      if (data?.policy) onSaved(data.policy);
+      else setFailed(true);
+    } catch {
+      setFailed(true);
     } finally {
       setSaving(false);
     }
@@ -158,9 +165,12 @@ export function PolicyPanel({
       bodyClassName="p-0"
       meta={
         dirty ? (
-          <Button onClick={save} disabled={saving} variant="primary" className="py-1">
-            {saving ? "Applying…" : "Apply"}
-          </Button>
+          <>
+            {failed ? <Status tone="crit">Not applied</Status> : null}
+            <Button onClick={save} disabled={saving} variant="primary" className="py-1">
+              {saving ? "Applying…" : failed ? "Retry" : "Apply"}
+            </Button>
+          </>
         ) : (
           <Status tone="ok">Active</Status>
         )

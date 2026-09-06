@@ -13,8 +13,16 @@ export interface Scenario {
   expected: "ALLOW" | "BLOCK" | "HALT";
   summary: string;
   trade: ProposedTrade;
-  /** Stages an intraday loss before submitting, for the circuit-breaker demo. */
-  stageDrawdown?: { peakEquity: number; currentEquity: number };
+  /**
+   * Stages an intraday loss before submitting, for the circuit-breaker demo,
+   * expressed as a drawdown from the peak rather than as two fixed balances.
+   *
+   * The staging raises the intraday high-water mark relative to whatever the
+   * account is actually worth; it never invents a current balance. That keeps
+   * the demo honest on a connected account, where a fabricated equity figure
+   * would be displayed as the real one and would drive real risk decisions.
+   */
+  stageDrawdown?: { breachPct: number };
 }
 
 export const SCENARIOS: Scenario[] = [
@@ -68,7 +76,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Drawdown circuit breaker",
     expected: "HALT",
     summary: "Equity drops 6% from the intraday peak, then a compliant trade is refused.",
-    stageDrawdown: { peakEquity: 11000, currentEquity: 10340 },
+    stageDrawdown: { breachPct: 0.06 },
     trade: {
       symbol: "BTCUSDT",
       side: "BUY",

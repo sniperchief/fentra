@@ -15,6 +15,23 @@ import crypto from "node:crypto";
 export const PUBLIC_SPOT_BASE = "https://api.binance.com";
 
 /**
+ * Public market-data host, overridable with BINANCE_PUBLIC_BASE.
+ *
+ * Binance serves the same unauthenticated `/api/v3/*` endpoints from several
+ * hosts, and which of them a given network can reach is not something the
+ * application gets to decide: some ISPs resolve `binance.com` and not
+ * `binance.vision`, some the other way round. Since a live order cannot be
+ * sized without a live quote, an unreachable quote host stops trading
+ * altogether — so the host is configuration, not a constant.
+ *
+ * Read per call rather than at import, so the process environment is what
+ * decides rather than module load order.
+ */
+export function publicBase(): string {
+  return process.env.BINANCE_PUBLIC_BASE?.trim() || PUBLIC_SPOT_BASE;
+}
+
+/**
  * USDⓈ-M futures hosts, per the current Binance derivatives documentation.
  * The testnet moved from `testnet.binancefuture.com` to `demo-fapi.binance.com`;
  * the old host still answers, but the documented one is authoritative here.
@@ -41,6 +58,25 @@ export class BinanceApiError extends Error {
   }
 }
 
+/**
+ * Turns a transport failure into something an operator can act on.
+ *
+ * `fetch` reports every network problem as the bare string "fetch failed" and
+ * hides the reason on `cause`. A blocked DNS entry, a refused connection and a
+ * timeout then look identical in the UI, which is useless when the fix is to
+ * point at a different host. The host is named; the query string never is,
+ * because it carries the request signature.
+ */
+function transportError(err: unknown, base: string, path: string): BinanceApiError {
+  const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
+  const reason = cause?.code ?? cause?.message ?? (err as Error)?.message ?? "unknown error";
+  const hint =
+    reason === "ENOTFOUND" || reason === "EAI_AGAIN"
+      ? ". The host did not resolve; set BINANCE_FUTURES_BASE / BINANCE_PUBLIC_BASE to a host this network can reach."
+      : "";
+  return new BinanceApiError(`Could not reach ${base}${path}: ${reason}${hint}`, 0);
+}
+
 function toQuery(params: Record<string, string | number | undefined>): string {
   return Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== "")
@@ -52,15 +88,20 @@ function toQuery(params: Record<string, string | number | undefined>): string {
 export async function publicGet<T>(
   path: string,
   params: Record<string, string | number | undefined> = {},
-  base = PUBLIC_SPOT_BASE,
+  base = publicBase(),
 ): Promise<T> {
   const qs = toQuery(params);
   const url = `${base}${path}${qs ? `?${qs}` : ""}`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-    signal: AbortSignal.timeout(8000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (err) {
+    throw transportError(err, base, path);
+  }
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     throw new BinanceApiError(
@@ -105,12 +146,19 @@ export async function signedRequest<T>(
   });
   const url = `${creds.futuresBase}${path}?${signed}`;
 
-  const res = await fetch(url, {
-    method,
-    headers: { "X-MBX-APIKEY": creds.apiKey, Accept: "application/json" },
-    cache: "no-store",
-    signal: AbortSignal.timeout(10000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: { "X-MBX-APIKEY": creds.apiKey, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (err) {
+    // Never let the raw error escape: the URL it may carry contains the
+    // request signature.
+    throw transportError(err, creds.futuresBase, path);
+  }
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     throw new BinanceApiError(

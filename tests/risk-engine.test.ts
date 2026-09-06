@@ -254,6 +254,102 @@ describe("risk engine", () => {
   });
 });
 
+/**
+ * Regression tests for fail-closed behaviour on inputs the rules cannot measure.
+ *
+ * NaN compares false against every limit, so an unreadable account figure used
+ * to pass each check silently. These assert the opposite direction.
+ */
+describe("unusable account state fails closed", () => {
+  const unreadable = { ...account, equity: NaN, peakEquityToday: NaN };
+
+  it("refuses a trade when equity cannot be read", () => {
+    const result = evaluate({ account: unreadable });
+    expect(result.decision).toBe("BLOCK");
+    expect(checkFor(result, "position_size").passed).toBe(false);
+    expect(checkFor(result, "leverage").passed).toBe(false);
+  });
+
+  it("refuses a trade when equity is infinite", () => {
+    const result = evaluate({ account: { ...account, equity: Infinity } });
+    expect(result.decision).toBe("BLOCK");
+  });
+
+  it("never reports a NaN drawdown, which would read as no drawdown", () => {
+    const result = evaluate({ account: unreadable });
+    expect(Number.isNaN(result.metrics.dailyDrawdown)).toBe(false);
+  });
+
+  it("resolves a percentage order cap to zero rather than NaN", () => {
+    const result = evaluate({
+      account: unreadable,
+      policy: { ...DEFAULT_POLICY, maxOrderNotionalMode: "PCT_OF_EQUITY", maxOrderNotional: 0.1 },
+    });
+    expect(checkFor(result, "order_notional").limit).toBe(0);
+    expect(checkFor(result, "order_notional").passed).toBe(false);
+  });
+});
+
+describe("units", () => {
+  it("refuses a pair that is not quoted in USDT, because every limit is USDT", () => {
+    const ethbtc: MarketState = { ...market, symbol: "ETHBTC", price: 0.036 };
+    const result = evaluate({
+      market: ethbtc,
+      proposedTrade: { ...baseTrade, symbol: "ETHBTC", notional: 100 },
+    });
+    expect(result.decision).toBe("BLOCK");
+    expect(checkFor(result, "order_sanity").detail).toContain("USDT");
+  });
+
+  it("refuses an empty symbol", () => {
+    const result = evaluate({
+      market: { ...market, symbol: "" },
+      proposedTrade: { ...baseTrade, symbol: "" },
+    });
+    expect(result.decision).toBe("BLOCK");
+  });
+});
+
+describe("reducing exposure", () => {
+  const big: Position[] = [
+    {
+      symbol: "BTCUSDT",
+      side: "LONG",
+      notional: 4000,
+      entryPrice: 68000,
+      markPrice: 68000,
+      leverage: 3,
+      unrealizedPnl: 0,
+    },
+  ];
+
+  it("allows closing a large position instead of counting the close as new exposure", () => {
+    const result = evaluate({
+      account: { ...account, equity: 1000 },
+      positions: big,
+      proposedTrade: { ...baseTrade, side: "SELL", notional: 4000 },
+    });
+    expect(result.metrics.portfolioExposure).toBe(0);
+    expect(checkFor(result, "leverage").passed).toBe(true);
+  });
+
+  it("still measures exposure that a trade adds", () => {
+    const result = evaluate({
+      positions: big,
+      proposedTrade: { ...baseTrade, side: "BUY", notional: 1000 },
+    });
+    expect(result.metrics.portfolioExposure).toBe(5000);
+  });
+
+  it("counts a flip through zero as the exposure left on the other side", () => {
+    const result = evaluate({
+      positions: big,
+      proposedTrade: { ...baseTrade, side: "SELL", notional: 5000 },
+    });
+    expect(result.metrics.portfolioExposure).toBe(1000);
+  });
+});
+
 describe("risk-sensitive account operations", () => {
   it("blocks raising leverage beyond the policy limit", () => {
     const result = evaluateAccountOperation(
@@ -289,6 +385,17 @@ describe("risk-sensitive account operations", () => {
       DEFAULT_POLICY,
     );
     expect(result.decision).toBe("HALT");
+  });
+
+  it("refuses a leverage setting that is not a whole number", () => {
+    for (const leverage of [NaN, Infinity, 0, -2, 3.5]) {
+      const result = evaluateAccountOperation(
+        { kind: "SET_LEVERAGE", symbol: "BTCUSDT", leverage },
+        account,
+        DEFAULT_POLICY,
+      );
+      expect(result.decision).toBe("BLOCK");
+    }
   });
 
   it("still allows cancelling an order while halted, because it reduces exposure", () => {

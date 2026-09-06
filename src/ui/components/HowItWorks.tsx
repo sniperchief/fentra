@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { DEFAULT_POLICY } from "@/policy/policy-store";
+import type { X402Mode } from "@/x402/config";
 import { DECISION_THEME, pct, usd0 } from "@/ui/types";
 import { Label } from "./primitives";
 
@@ -91,7 +92,11 @@ const PRINCIPLES = [
   },
 ];
 
-export function HowItWorks() {
+export function HowItWorks({ x402Mode }: { x402Mode?: X402Mode }) {
+  const paymentSample =
+    x402Mode === "live"
+      ? '{ "status": "verified", "mode": "live" }'
+      : '{ "status": "simulated", "mode": "demo" }';
   return (
     <>
       {/* ---- How it works ------------------------------------------- */}
@@ -171,33 +176,43 @@ export function HowItWorks() {
         </div>
       </Section>
 
-      {/* ---- Open verdict endpoint ---------------------------------- */}
+      {/* ---- Paid verdict endpoint (x402) --------------------------- */}
       <Section
-        eyebrow="Open endpoint"
-        title="Any agent can ask for a verdict"
-        lede="POST a proposed trade to /api/risk/check and receive the same deterministic decision Fentra applies to its own agent. Advisory only — it never executes and never touches history."
+        eyebrow="Paid endpoint · x402"
+        title="Any agent can buy a verdict"
+        lede="POST a proposed trade to /api/risk/check, pay 0.01 USDC on BNB Chain over x402, and receive the same deterministic decision Fentra applies to its own agent. Advisory only — it never executes and never touches history."
       >
         <div className="border border-line bg-paper">
           <div className="flex items-center justify-between border-b border-line px-5 py-2.5">
             <Label>POST /api/risk/check</Label>
             <span className="font-mono text-[10.5px] uppercase tracking-label text-faint">
-              read-only · no order placed
+              0.01 USDC · read-only · no order placed
             </span>
           </div>
           <pre className="overflow-x-auto px-5 py-4 font-mono text-[13px] leading-relaxed text-ash">
-{`{ "trade": {
-    "symbol": "BTCUSDT",
-    "side": "BUY",
-    "type": "MARKET",
-    "notional": 2000,
-    "leverage": 10,
-    "market": "USDM_FUTURES"
-} }
+{`POST /api/risk/check            → 402 Payment Required
+  { "x402Version": 2, "accepts": [{ "amount": "0.01 USDC",
+    "network": "eip155:56", "scheme": "permit2-exact" }] }
+
+POST /api/risk/check            ← PAYMENT-SIGNATURE: <base64>
+{ "symbol": "BTCUSDT", "side": "BUY", "type": "MARKET",
+  "notional": 2000, "leverage": 10 }
 
 → { "decision": "BLOCK",
     "reasons": ["Leverage: Requested 10x exceeds the 5x policy limit."],
+    "payment": ${paymentSample},
     "executed": false }`}
           </pre>
+          <div className="border-t border-line px-5 py-2.5">
+            <span className="font-mono text-[10.5px] uppercase tracking-label text-faint">
+              {x402Mode === "live"
+                ? "Live mode · payment verified by an x402 facilitator"
+                : x402Mode === "demo"
+                  ? "Demo mode · payment simulated, no USDC transferred"
+                  : "Payment required"}{" "}
+              · GET /api/risk/check/info
+            </span>
+          </div>
         </div>
       </Section>
 

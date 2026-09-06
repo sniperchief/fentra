@@ -25,6 +25,18 @@ export function TradeProposal({
   const decision = record?.evaluation.decision ?? null;
   const theme = decision ? DECISION_THEME[decision] : null;
 
+  // Clearing the risk engine is not the same as filling. An ALLOW whose order
+  // the venue then rejected must never read as executed.
+  const execution = record?.execution;
+  const allowStatus = !execution
+    ? { text: "Cleared · not executed", tone: "warn" as const }
+    : execution.ok
+      ? {
+          text: execution.simulated ? "Cleared · simulated fill" : "Cleared · executed",
+          tone: "ok" as const,
+        }
+      : { text: "Cleared · execution failed", tone: "crit" as const };
+
   const status = !record
     ? stage === "PROPOSING"
       ? { text: "Composing proposal", tone: "accent" as const }
@@ -32,7 +44,7 @@ export function TradeProposal({
     : !settled
       ? { text: "Awaiting risk evaluation", tone: "accent" as const }
       : decision === "ALLOW"
-        ? { text: "Cleared · executed", tone: "ok" as const }
+        ? allowStatus
         : decision === "BLOCK"
           ? { text: "Refused at the gate", tone: "warn" as const }
           : { text: "Refused · trading halted", tone: "crit" as const };

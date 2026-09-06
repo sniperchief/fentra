@@ -12,6 +12,7 @@ import { RiskEngine, DecisionSummary } from "@/ui/components/RiskEngine";
 import { ScenarioPanel } from "@/ui/components/ScenarioPanel";
 import { HaltBanner, TopBar, Wordmark } from "@/ui/components/Shell";
 import { TradeProposal } from "@/ui/components/TradeProposal";
+import { X402Panel } from "@/ui/components/X402Panel";
 import { Label } from "@/ui/components/primitives";
 import {
   clockTime,
@@ -32,11 +33,19 @@ export default function ControlPlane() {
   const [history, setHistory] = useState<Anthropic.MessageParam[]>([]);
   const [scenarioBusy, setScenarioBusy] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
+  /** Set when the console has never managed to load a snapshot. */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   /* Verdict presentation. `record` is always something the server produced. */
   const [stage, setStage] = useState<Stage>("IDLE");
   const [record, setRecord] = useState<TradeRecord | null>(null);
   const [revealed, setRevealed] = useState(0);
+
+  /** Mirrors `record` so the poller can read it without re-subscribing. */
+  const recordRef = useRef<TradeRecord | null>(null);
+  useEffect(() => {
+    recordRef.current = record;
+  }, [record]);
 
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const clearTimers = () => {
@@ -51,6 +60,7 @@ export default function ControlPlane() {
    */
   const present = useCallback((next: TradeRecord, animate: boolean) => {
     clearTimers();
+    recordRef.current = next;
     setRecord(next);
     const total = next.evaluation.checks.length;
     if (!animate) {
@@ -67,21 +77,29 @@ export default function ControlPlane() {
   }, []);
 
   const refresh = useCallback(async () => {
-    const res = await fetch("/api/state", { cache: "no-store" });
-    if (!res.ok) return;
-    const next: AppState = await res.json();
+    // A failed poll leaves the last good snapshot on screen rather than
+    // rejecting inside the interval callback.
+    const res = await fetch("/api/state", { cache: "no-store" }).catch(() => null);
+    if (!res || !res.ok) {
+      const body = res ? await res.json().catch(() => null) : null;
+      setLoadError(
+        (body as { error?: string } | null)?.error ?? "The control plane is not responding.",
+      );
+      return;
+    }
+    const next = (await res.json().catch(() => null)) as AppState | null;
+    if (!next?.snapshot) return;
+    setLoadError(null);
     setState(next);
     setSyncedAt(Date.now());
     // On a reload, adopt the most recent evaluation rather than showing an
-    // empty engine next to a populated audit log.
-    setRecord((current) => {
-      if (current || next.history.length === 0) return current;
-      const latest = next.history[0];
-      setRevealed(latest.evaluation.checks.length);
-      setStage("DECIDED");
-      return latest;
-    });
-  }, []);
+    // empty engine next to a populated audit log. Read through the ref rather
+    // than from inside a state updater: an updater must stay pure, and React
+    // runs it twice in development.
+    if (!recordRef.current && next.history.length > 0) {
+      present(next.history[0], false);
+    }
+  }, [present]);
 
   useEffect(() => {
     refresh();
@@ -97,6 +115,7 @@ export default function ControlPlane() {
   async function sendMessage(text: string) {
     setMessages((m) => [...m, { role: "user", text }]);
     clearTimers();
+    recordRef.current = null;
     setRecord(null);
     setRevealed(0);
     setStage("PROPOSING");
@@ -146,6 +165,7 @@ export default function ControlPlane() {
   async function runScenario(id: string) {
     setScenarioBusy(id);
     clearTimers();
+    recordRef.current = null;
     setRecord(null);
     setRevealed(0);
     setStage("EVALUATING");
@@ -155,8 +175,20 @@ export default function ControlPlane() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),
       });
-      const data = await res.json();
-      if (data.record) {
+      const data = await res.json().catch(() => ({}));
+      // A refused scenario (demo-only endpoint, bad id) reports why rather
+      // than silently going idle.
+      if (!res.ok) {
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            text: typeof data.error === "string" ? data.error : "The scenario could not be run.",
+            error: true,
+          },
+        ]);
+        setStage("IDLE");
+      } else if (data.record) {
         const scenario = scenarios.find((s) => s.id === id);
         setMessages((m) => [
           ...m,
@@ -180,10 +212,11 @@ export default function ControlPlane() {
   }
 
   async function reset() {
-    await fetch("/api/reset", { method: "POST" });
+    await fetch("/api/reset", { method: "POST" }).catch(() => undefined);
     clearTimers();
     setMessages([]);
     setHistory([]);
+    recordRef.current = null;
     setRecord(null);
     setRevealed(0);
     setStage("IDLE");
@@ -192,15 +225,29 @@ export default function ControlPlane() {
 
   if (!state) {
     return (
-      <main className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
+      <main className="flex min-h-screen items-center justify-center px-6">
+        <div className="flex max-w-[60ch] flex-col items-center gap-3 text-center">
           <Wordmark />
-          <div className="relative h-px w-32 overflow-hidden bg-line">
-            <span className="absolute top-0 h-px w-[40%] animate-sweep bg-accent" />
-          </div>
-          <span className="font-mono text-[11px] uppercase tracking-label text-mute">
-            Connecting to control plane
-          </span>
+          {loadError ? (
+            <>
+              <span className="font-mono text-[11px] uppercase tracking-label text-block">
+                Control plane unavailable
+              </span>
+              <p className="text-[13px] leading-relaxed text-ash">{loadError}</p>
+              <p className="font-mono text-[11px] uppercase tracking-label text-faint">
+                Retrying every 6 seconds
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="relative h-px w-32 overflow-hidden bg-line">
+                <span className="absolute top-0 h-px w-[40%] animate-sweep bg-accent" />
+              </div>
+              <span className="font-mono text-[11px] uppercase tracking-label text-mute">
+                Connecting to control plane
+              </span>
+            </>
+          )}
         </div>
       </main>
     );
@@ -295,8 +342,13 @@ export default function ControlPlane() {
             <ActivityStream history={state.history} />
           </div>
 
-          {/* Row 5 — the audit trail, across the full width. */}
+          {/* Row 5 — external agents paying for the same verdict. */}
           <div className="order-9 flex lg:order-none lg:col-span-12">
+            <X402Panel />
+          </div>
+
+          {/* Row 6 — the audit trail, across the full width. */}
+          <div className="order-10 flex lg:order-none lg:col-span-12">
             <ExecutionLog
               history={state.history}
               selectedId={record?.id ?? null}

@@ -28,12 +28,44 @@ export function exposureForSymbol(positions: Position[], symbol: string): number
     .reduce((sum, p) => sum + signedNotional(p.side, p.notional), 0);
 }
 
-export function totalExposure(positions: Position[]): number {
-  return positions.reduce((sum, p) => sum + Math.abs(p.notional), 0);
+/**
+ * Portfolio exposure once the proposed order fills.
+ *
+ * Netted per symbol rather than added on top, because an order that closes a
+ * position removes exposure instead of doubling it. Treating every order as
+ * additive made a full close of a large position look like twice the exposure,
+ * which the leverage rule would then refuse — blocking the one trade that
+ * reduces risk.
+ */
+export function projectedPortfolioExposure(positions: Position[], trade: ProposedTrade): number {
+  const bySymbol = new Map<string, number>();
+  for (const p of positions) {
+    bySymbol.set(p.symbol, (bySymbol.get(p.symbol) ?? 0) + signedNotional(p.side, p.notional));
+  }
+  const delta = signedNotional(trade.side, trade.notional);
+  bySymbol.set(trade.symbol, (bySymbol.get(trade.symbol) ?? 0) + delta);
+
+  let total = 0;
+  for (const net of bySymbol.values()) total += Math.abs(net);
+  return total;
+}
+
+/**
+ * True when equity is a figure the rules can actually measure against.
+ *
+ * A venue can answer with a missing or unparseable field, which becomes NaN,
+ * and NaN silently passes every `>` comparison in the rules below. Equity is
+ * therefore checked once, here, and the rules that depend on it fail closed.
+ */
+export function hasUsableEquity(account: AccountState): boolean {
+  return Number.isFinite(account.equity) && account.equity > 0;
 }
 
 export function dailyDrawdown(account: AccountState): number {
-  if (account.peakEquityToday <= 0) return 0;
+  // An unmeasurable peak or equity yields no drawdown figure rather than NaN,
+  // which would compare false against the limit and read as "no drawdown".
+  if (!Number.isFinite(account.peakEquityToday) || account.peakEquityToday <= 0) return 0;
+  if (!Number.isFinite(account.equity)) return 0;
   const dd = (account.peakEquityToday - account.equity) / account.peakEquityToday;
   return dd > 0 ? dd : 0;
 }
@@ -87,6 +119,21 @@ export function checkPositionSize(
 ): RiskCheck {
   const existing = exposureForSymbol(positions, trade.symbol);
   const projected = Math.abs(existing + signedNotional(trade.side, trade.notional));
+
+  // Without a usable equity figure the cap is unknown, so nothing can be
+  // measured against it. Refuse rather than let NaN compare false.
+  if (!hasUsableEquity(account)) {
+    return {
+      id: "position_size",
+      label: "Position size",
+      passed: false,
+      detail: `Account equity is unavailable, so the ${pct(
+        policy.maxPositionSizePct,
+      )} of equity cap cannot be evaluated. No trade is sized against an unknown account.`,
+      observed: projected,
+    };
+  }
+
   const maxAllowed = account.equity * policy.maxPositionSizePct;
   const breached = projected > maxAllowed;
 
@@ -117,19 +164,23 @@ export function checkLeverage(
   policy: RiskPolicy,
 ): RiskCheck {
   const requested = trade.leverage;
-  const portfolioAfter = totalExposure(positions) + trade.notional;
+  const portfolioAfter = projectedPortfolioExposure(positions, trade);
   const accountLeverageAfter = account.equity > 0 ? portfolioAfter / account.equity : Infinity;
 
   // An unfunded account cannot support any exposure, and dividing by zero
-  // equity would otherwise surface as "Infinityx" in the UI.
-  if (account.equity <= 0) {
+  // equity would otherwise surface as "Infinityx" in the UI. A non-finite
+  // equity reading is treated the same way: it is not a number any limit can
+  // be checked against, so it fails rather than passing every comparison.
+  if (!hasUsableEquity(account)) {
     return {
       id: "leverage",
       label: "Leverage",
       passed: false,
-      detail: `Account equity is ${usd(account.equity)}. There is no margin to support a ${usd(
-        trade.notional,
-      )} position. Fund the account before trading.`,
+      detail: Number.isFinite(account.equity)
+        ? `Account equity is ${usd(account.equity)}. There is no margin to support a ${usd(
+            trade.notional,
+          )} position. Fund the account before trading.`
+        : `Account equity is unavailable, so leverage cannot be evaluated. Trading is refused until the account reports a usable balance.`,
       observed: requested,
       limit: policy.maxLeverage,
     };
@@ -179,9 +230,11 @@ export function checkLeverage(
  * fixed number that means something different at every account size.
  */
 export function resolveOrderNotionalLimit(account: AccountState, policy: RiskPolicy): number {
-  return policy.maxOrderNotionalMode === "PCT_OF_EQUITY"
-    ? Math.max(account.equity, 0) * policy.maxOrderNotional
-    : policy.maxOrderNotional;
+  if (policy.maxOrderNotionalMode !== "PCT_OF_EQUITY") return policy.maxOrderNotional;
+  // An unreadable equity resolves the cap to zero rather than to NaN, which
+  // would compare false against every order size.
+  const equity = Number.isFinite(account.equity) ? Math.max(account.equity, 0) : 0;
+  return equity * policy.maxOrderNotional;
 }
 
 export function checkOrderNotional(
@@ -230,6 +283,15 @@ export function checkOrderSanity(
   if (trade.symbol !== market.symbol) {
     problems.push(
       `symbol mismatch, order is for ${trade.symbol} but the quote is for ${market.symbol}`,
+    );
+  }
+  // Notional, equity and every policy limit are USDT figures. A pair quoted in
+  // anything else would have its size measured in one currency against limits
+  // written in another, so the units are checked rather than assumed.
+  if (!/^[A-Z0-9]{2,15}USDT$/.test(trade.symbol)) {
+    problems.push(
+      `${trade.symbol || "(no symbol)"} is not a USDT-quoted pair; order notional and every ` +
+        `policy limit are denominated in USDT`,
     );
   }
   if (!Number.isFinite(trade.notional) || trade.notional <= 0) {

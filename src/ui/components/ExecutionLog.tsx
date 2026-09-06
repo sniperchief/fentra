@@ -89,11 +89,13 @@ export function ExecutionLog({
                         {verdictWord(r.evaluation.decision)}
                       </td>
                       <td className="px-5 py-2 text-faint">
-                        {r.execution
-                          ? r.execution.simulated
-                            ? "simulated fill"
-                            : `${r.execution.venue.toLowerCase().replace("_", " ")}`
-                          : "never reached executor"}
+                        {!r.execution
+                          ? "never reached executor"
+                          : !r.execution.ok
+                            ? "execution failed"
+                            : r.execution.simulated
+                              ? "simulated fill"
+                              : `${r.execution.venue.toLowerCase().replace("_", " ")}`}
                       </td>
                     </tr>
                     {isOpen ? (

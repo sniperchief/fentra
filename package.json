@@ -2,6 +2,7 @@
   "name": "fentra",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Deterministic risk control plane between an AI trading agent and Binance execution.",
   "scripts": {
     "dev": "next dev",
@@ -11,7 +12,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "check:binance": "node scripts/check-binance.mjs",
-    "mcp": "tsx --env-file-if-exists=.env.local src/mcp/server.ts"
+    "mcp": "tsx --env-file-if-exists=.env.local src/mcp/server.ts",
+    "x402:pay": "node scripts/x402-pay.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",
@@ -30,7 +32,9 @@
     "tailwindcss": "^3.4.13",
     "tsx": "^4.23.13",
     "typescript": "^5.6.2",
-    "vitest": "^2.1.2"
+    "viem": "^2.56.3",
+    "vitest": "^2.1.2",
+    "x402-fetch": "^1.2.0"
   },
   "allowScripts": {
     "esbuild@0.21.5": true

@@ -7,6 +7,7 @@ import { HowItWorks } from "@/ui/components/HowItWorks";
 import { StatusStrip, TopBar } from "@/ui/components/Shell";
 import { Label } from "@/ui/components/primitives";
 import type { AppState } from "@/ui/types";
+import type { X402Mode } from "@/x402/config";
 
 /**
  * The landing page: what Fentra is and how it works.
@@ -18,6 +19,8 @@ import type { AppState } from "@/ui/types";
  */
 export default function Landing() {
   const [state, setState] = useState<AppState | null>(null);
+  // Read separately from /api/state, which depends on Binance being reachable.
+  const [x402Mode, setX402Mode] = useState<X402Mode | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -25,6 +28,12 @@ export default function Landing() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled && d) setState(d);
+      })
+      .catch(() => undefined);
+    fetch("/api/x402/log", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setX402Mode(d.mode as X402Mode);
       })
       .catch(() => undefined);
     return () => {
@@ -56,7 +65,7 @@ export default function Landing() {
         </section>
       ) : null}
 
-      <HowItWorks />
+      <HowItWorks x402Mode={x402Mode} />
 
       <footer className="mx-auto max-w-[1560px] px-4 py-8 sm:px-6">
         <div className="flex flex-wrap items-start justify-between gap-4">

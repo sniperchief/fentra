@@ -19,7 +19,9 @@ export function AccountPanel({
   const { account, markets, positions } = snapshot;
   const halted = account.tradingHalted;
   const ddHot = snapshot.dailyDrawdown > policy.maxDailyDrawdownPct * 0.6;
-  const live = markets[0]?.source === "BINANCE_PUBLIC";
+  // Every quote has to be live before the strip claims live prices; one symbol
+  // falling back to a reference price makes the whole row "reference".
+  const live = markets.length > 0 && markets.every((m) => m.source === "BINANCE_PUBLIC");
 
   return (
     <Panel

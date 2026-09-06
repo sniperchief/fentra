@@ -393,20 +393,243 @@ the engine re-evaluates against live state when the proposal actually arrives.
 
 ## Public risk API (x402, stretch)
 
+Fentra's risk engine is exposed as a paid API, so an external AI agent can buy a verdict before it
+trades. One call, one fixed price, settled in USDC on BNB Chain over [x402](https://www.x402.org).
+
 ```
-POST /api/risk/check
-{ "trade": { "symbol": "BTCUSDT", "side": "BUY", "type": "MARKET",
-             "notional": 2000, "leverage": 20, "market": "USDM_FUTURES" } }
+GET  /api/risk/check/info    free service description
+POST /api/risk/check         0.01 USDC per check
+GET  /api/x402/log           the paid-check log behind the dashboard panel
+GET  /llms.txt               machine-readable service description
+GET  /agents                 integration guide, for the humans wiring it up
 ```
 
-Returns the same deterministic verdict Fentra applies to its own agent, so another AI agent can
-ask "should I make this trade?" before acting. Read-only: it never executes and never touches
-history.
+```bash
+# Unpaid: the server answers with the price.
+curl -i -X POST localhost:3000/api/risk/check \
+  -H 'Content-Type: application/json' \
+  -d '{"symbol":"BTCUSDT","side":"BUY","type":"MARKET","notional":2000,"leverage":20}'
+# HTTP/1.1 402 Payment Required
 
-Setting `FENTRA_X402_PRICE_USDC` gates the endpoint with an HTTP 402 and an x402-shaped payment
-requirements body. **Payment verification requires a facilitator, which is not wired up**, so with
-a price set the endpoint gates rather than settles. It is off by default and never reports a
-payment as received.
+# Paid: base64 x402 payment payload in the header.
+curl -X POST localhost:3000/api/risk/check \
+  -H 'Content-Type: application/json' \
+  -H "PAYMENT-SIGNATURE: $(base64 -w0 payment.json)" \
+  -d '{"symbol":"BTCUSDT","side":"BUY","type":"MARKET","notional":2000,"leverage":20}'
+# { "decision": "BLOCK", "reasons": [...], "payment": { "status": "...", "mode": "..." } }
+```
+
+This is a wrapper, not a second risk system. It calls `ControlPlane.evaluateOnly`, which calls the
+one `evaluateTrade` in `src/risk/risk-engine.ts`. Proposals are evaluated against Fentra's own
+account, positions and policy; a caller cannot supply their own policy, because a verdict produced
+under limits the caller chose would not mean anything.
+
+**It cannot trade.** `TradingExecutor.executeTrade` is reachable only from
+`ControlPlane.submitProposal`, which this route never calls. Eight differently-shaped inputs assert
+it in the test suite.
+
+### Research findings
+
+Recorded before implementing, from the sources below.
+
+**The handshake, and that there are two of them.** The server answers an unpaid request with HTTP
+402 and a JSON body; the client retries with a base64-encoded `PaymentPayload` in a header. But v1
+and v2 are different documents, not one with fields renamed, and the network decides which you get:
+
+|  | v1 | v2 |
+|---|---|---|
+| 402 body | `{ x402Version, error, accepts }` | adds a top-level `resource` object |
+| price field | `maxAmountRequired` | `amount` |
+| resource | inside each `accepts` entry | beside `accepts` |
+| network id | name, e.g. `base-sepolia` | CAIP-2, e.g. `eip155:56` |
+| header | `X-PAYMENT` | `PAYMENT-SIGNATURE` |
+| served by | Base and Solana facilitators | BNB Chain / Binance B402 |
+
+Fentra implements both and accepts either header name. Which one it advertises is one environment
+variable. None of this is Fentra's invention; the shapes are transcribed into `src/x402/types.ts`
+from the specification, and the v1 request shape was confirmed against a live facilitator.
+
+**Verification is the facilitator's job.** The resource server does not read the chain. It POSTs
+`{ x402Version, paymentPayload, paymentRequirements }` to the facilitator's `/verify` and gets back
+`{ isValid, invalidReason?, payer? }`. `/settle` has the same request shape and returns
+`{ success, transaction, network, ... }`. Fentra implements `/verify` only — see the caveat below.
+
+**What live B402 endpoints actually publish.** Binance's B402 Bazaar is its public discovery layer
+for x402-paid endpoints, documented at
+`https://www.binance.com/bapi/ramp/v1/public/ramp/b402` and served unauthenticated from Binance's
+own domain. Reading the 20 live listings corrected one thing the written v2 spec does not tell you:
+
+```json
+{ "resource": "https://…/v1/probability", "x402Version": 2,
+  "accepts": [{ "scheme": "eip3009", "network": "eip155:56",
+                "asset": "0x8d0D…8B0d", "maxAmountRequired": "10000000000000000",
+                "payTo": "0xA8b2…1d68" }] }
+```
+
+Every entry names the price **`maxAmountRequired`**, not the v2 spec's `amount`, while still
+declaring `x402Version: 2`. Fentra emits both, with the same value, so a client reading either
+spelling gets the right number. The listings also confirm `eip155:56`, 18-decimal atomic units,
+0.01 as the going rate, and two schemes in production use — `permit2-exact` and `eip3009` — across
+USDC (`0x8AC7…580d`), USDT (`0x55d3≥955`), USD1 (`0x8d0D…8B0d`) and U (`0xcE24♦6`).
+
+Treat that as corroboration, not as the contract: those listings are what third-party merchants
+publish, and the authority on what the facilitator *accepts* is Binance's own `/supported`
+endpoint, which is not reachable without the API key its product page tells you to apply for.
+
+**Settlement is USDC on BNB Chain.** Binance x402 is a BNB-Chain payment flow (`eip155:56`) over
+off-chain authorization and on-chain settlement, with the facilitator sponsoring gas, so neither
+buyer nor merchant needs BNB. BSC tokens do not implement EIP-3009, so the standard `exact` scheme
+does not apply there; Binance uses a Permit2-based scheme (`permit2-exact`) with EIP-712 typed-data
+signatures. Note that Binance-Peg USDC on BSC is **18-decimal**, not 6-decimal as on Ethereum, so
+$0.01 is `10000000000000000` atomic units — computed in `BigInt`, never in a JS number.
+
+**Any x402 client works.** A Binance Agentic Wallet is not required on the paying side. Trust Wallet
+AgentKit supports Binance x402 natively and Binance's Agentic Wallet is being added, but the payer
+only has to produce a valid signed authorization for the advertised scheme.
+
+Sources: [x402.org](https://www.x402.org) ·
+[x402 specification](https://github.com/coinbase/x402/tree/main/specs) ·
+[Binance x402](https://www.binance.com/binancex402) ·
+[Binance onchainpay-x402 docs](https://developers.binance.com/docs/onchainpay-x402/b402-bazaar) ·
+[B402 Bazaar, read live](https://www.binance.com/bapi/ramp/v1/public/ramp/b402/bazaar/search) ·
+[Binance Agentic Hub](https://web3.binance.com/agentic-hub)
+
+### LIVE MODE and DEMO MODE
+
+The endpoint always requires payment. There is no free tier and no bypass: an absent, malformed,
+mismatched or underpaying header returns 402 and the risk engine is never entered. What differs
+between the two modes is only whether the payment is *verified*.
+
+| | LIVE MODE | DEMO MODE |
+|---|---|---|
+| Trigger | `FENTRA_X402_FACILITATOR_URL` **and** `FENTRA_X402_PAY_TO` both set | anything less (the default) |
+| Verification | facilitator `/verify` | structural checks on the payload only |
+| Response | `"payment": { "status": "verified", "mode": "live" }` | `"payment": { "status": "simulated", "mode": "demo" }` |
+| `payTo` advertised | the configured merchant address | the zero address |
+| Dashboard revenue | USDC total | `Simulated` |
+
+**DEMO MODE never claims a payment happened.** The response carries an explicit note that nothing
+was verified on-chain and no USDC was transferred, the 402 payment requirements carry the same
+caveat, no transaction hash is fabricated, and the dashboard panel says "Demo mode" and "Payment
+simulated" on every row. Tests assert each of those.
+
+Fentra ships in DEMO MODE. Binance's V2 x402 APIs are reached through an approved partner developer
+account — `clientId` / `accessToken` with RSA-signed `X-Tesla-*` headers — which is not something a
+hackathon can obtain, so rather than guess at a credentialled handshake the payment step stops at a
+clearly-labelled simulation. Point `FENTRA_X402_FACILITATOR_URL` at any spec-compliant facilitator
+and the same code path runs for real; the live path is covered by tests against a mocked facilitator.
+
+### Going live: where the two values come from
+
+Two settings flip DEMO MODE to LIVE MODE. Neither is a secret, and neither is a
+private key — Fentra only ever needs a public receiving address.
+
+**`FENTRA_X402_PAY_TO` — your merchant address.** Any wallet address you control.
+Make a fresh one (MetaMask → add account → copy address) and use that; it must
+not be a Binance trading account or an execution wallet. Fentra only reads it to
+put in the payment requirements, so it never needs the private key.
+
+**`FENTRA_X402_FACILITATOR_URL` — a public x402 facilitator.** These verify and
+settle payments so a merchant does not have to touch a chain. Binance Agent OS
+x402 covers BNB Chain (Binance's own B402 facilitator), Base and Solana (via
+third-party facilitators). What each one actually serves, checked live:
+
+| Facilitator | Networks | Generation | Key needed | Status |
+|---|---|---|---|---|
+| `https://x402.org/facilitator` | Base Sepolia | v1 `exact` + v2 | no | live, **verified working** |
+| `https://facilitator.x402.rs` | 12 testnets incl. BSC testnet `eip155:97` | v1 base-sepolia; v2 elsewhere | no | live |
+| `https://facilitator.b402.ai` | BSC mainnet + testnet | — | no | **offline** (no DNS) |
+| Binance `/papi/v2/b402/*` | BNB Chain | v2 `permit2-exact` | partner `clientId` + RSA signing | gated |
+
+Fentra defaults to the BNB Chain v2 rails because that is the production target,
+but the combination that settles today is **v1 `exact` on Base Sepolia**. Setting
+`FENTRA_X402_PROTOCOL_VERSION=1` switches the whole rail — network, scheme, asset
+and decimals — in one variable; each field stays individually overridable.
+
+```bash
+FENTRA_X402_PROTOCOL_VERSION=1
+FENTRA_X402_FACILITATOR_URL=https://x402.org/facilitator
+FENTRA_X402_PAY_TO=0xYourReceivingAddress
+```
+
+That is the whole configuration. It yields `scheme: exact`, `network:
+base-sepolia`, `asset: 0x036CbD…F7e` (Base Sepolia USDC) and
+`maxAmountRequired: "10000"` — 0.01 USDC at six decimals.
+
+### Paying for real
+
+```bash
+npm run x402:pay -- http://localhost:3000/api/risk/check --notional 2000 --leverage 20
+```
+
+`scripts/x402-pay.mjs` is the client side of the handshake — the external agent.
+It uses the official `x402-fetch` package rather than signing anything by hand,
+so the payment is produced exactly as the protocol specifies.
+
+Set `X402_PAYER_PRIVATE_KEY` to a **throwaway** test key first. The wallet needs
+Base Sepolia USDC from [faucet.circle.com](https://faucet.circle.com) and nothing
+else: the `exact` scheme is gasless for the payer, because the facilitator
+submits the transfer and pays the gas.
+
+Verified against the live Coinbase facilitator with an unfunded wallet:
+
+```
+Unpaid request  -> HTTP 402      server states its price
+Payer      0x1566…D9eD           client signs an EIP-3009 authorization
+Paid request    -> HTTP 402      facilitator checked the chain and refused:
+                                 invalid_exact_evm_insufficient_balance
+```
+
+Every step of the handshake ran — the 402, the signature, the `X-PAYMENT` retry,
+the facilitator round trip, the on-chain check, and Fentra failing closed. The
+only missing ingredient was USDC in the wallet. Fund it and the same run returns
+a verdict with `"payment": { "status": "verified", "mode": "live" }`.
+
+### Caveats
+
+- **Verification, not settlement.** Fentra calls `/verify`, which proves a payment authorization is
+  valid, and does not call `/settle`, which is what actually broadcasts the transfer. Every response
+  says `"settled": false`. Wiring settlement is the next step and is deliberately not guessed at.
+- **Confirm the asset before going live.** The default asset address and 18-decimal assumption are
+  the documented Binance-Peg USDC values on BSC. Check them against the facilitator's `/supported`
+  endpoint before pointing this at real money.
+- Failure is closed in every direction: an unreachable facilitator, a non-200 reply and an
+  unrecognised response body are all treated as unpaid.
+
+### Discovery
+
+`/agents` is the integration page: copy-ready x402 and MCP snippets, the live payment terms, and a
+button that fires a genuine unpaid request so a visitor can see the real 402 without a wallet.
+`/llms.txt` is the same contract as plain text, following the convention for docs an agent can read
+without parsing a rendered page.
+
+Both derive every value from the running configuration rather than hardcoding it, so the price,
+network, mode and `payTo` on the page are the ones a caller will actually be charged and verified
+against. The snippets also carry whatever origin the page was served from, so tunnelling the server
+to a public URL makes them copy-paste correct with no edit — and the page says so plainly when the
+origin is localhost and therefore unreachable.
+
+This is documentation, not a directory. It describes one endpoint and advertises nothing else.
+
+### Why the log has its own endpoint
+
+`/api/x402/log` exists so the dashboard panel does not depend on Binance. `/api/state` fetches the
+account, positions and quotes, so it fails whenever the venue is unreachable or the local clock
+drifts outside the signature window (`-1021`) — and the dashboard keeps its last good state when a
+poll fails. Serving the payment log from there meant an exchange timeout could silently freeze it.
+This route reads process memory and nothing else.
+
+A useful consequence: the x402 feature now modifies no core file at all. `/api/state` and
+`ui/types.ts` are byte-identical to their pre-feature versions.
+
+### Keys stay out of it
+
+The merchant receiving address is its own variable and is never Fentra's trading account.
+`src/x402/config.ts` does not read `BINANCE_API_KEY` or `BINANCE_API_SECRET`, so the payment path
+and the execution path share no credential. The facilitator API key is read in one function in
+`src/x402/facilitator.ts` and never reaches a response body. The LLM has no tool that touches any of
+it — `src/agent/tools.ts` and `src/mcp/server.ts` do not import `@/x402` at all, which is asserted
+in the tests.
 
 ---
 
@@ -416,7 +639,7 @@ payment as received.
 npm test
 ```
 
-81 tests. Beyond per-rule coverage, the ones that matter most use a spy executor to prove the
+142 tests. Beyond per-rule coverage, the ones that matter most use a spy executor to prove the
 absence of an execution call:
 
 - `BLOCK: never calls the execution adapter`
@@ -428,6 +651,12 @@ absence of an execution call:
 - `adopts the first observed equity as the high-water mark when none is known`
 - `exposes exactly three read-only tools and no way to trade` (MCP)
 - `never calls the executor when checking a trade` (MCP)
+- `never calls executeTrade for ...` — eight input shapes against the paid x402 endpoint
+- `verifies payment before the risk engine runs` (x402)
+- `uses the real evaluateTrade rather than duplicated risk logic` (x402)
+- `labels the payment as simulated, never as verified` (x402 demo mode)
+- `emits a v1 402 document, not a v2 one` and `sends v1-shaped requirements to the facilitator`
+- `publishes the price under both names, as live B402 listings do` (B402 interop)
 
 "The trade was blocked" is proved by the executor never being called, not by a status string.
 
@@ -455,7 +684,22 @@ Stated plainly, since this is a hackathon MVP:
 - Venue leverage caps used by sanity validation are a conservative static table, not a live
   leverage-bracket lookup. The user policy is the tighter constraint in practice.
 - Live-mode intraday high-water mark starts from the first equity reading after the process
-  starts, because Binance does not expose an intraday peak. A consequence is that the drawdown
-  circuit breaker cannot be demonstrated against a live account without actually losing money —
-  the seeded scenario runs in Demo Mode, where staging a drawdown does not misstate a real balance.
-- The x402 endpoint gates but does not settle payments.
+  starts, because Binance does not expose an intraday peak. The drawdown scenario therefore stages
+  its precondition by raising that mark relative to whatever the account is actually worth, rather
+  than overriding the balance — so it demonstrates the breaker in Demo Mode and on the futures
+  testnet without ever displaying an invented equity figure. It is refused against a real-funds
+  account, where a fabricated drawdown must not drive a live risk decision.
+- The x402 endpoint verifies payments but does not settle them, and ships in DEMO MODE by
+  default; see "Public risk API" above for exactly what that does and does not claim. LIVE MODE
+  is proven against a public facilitator on Base Sepolia. BNB Chain mainnet needs Binance's
+  partner-credentialled B402 API, which a hackathon cannot obtain.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Note the warranty disclaimer in particular. Fentra can place real orders when Binance credentials
+are configured; it is provided as is, with no warranty, and the authors are not liable for trading
+losses. Run it against the futures testnet unless you have decided otherwise deliberately.

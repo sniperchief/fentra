@@ -65,13 +65,20 @@ export function resetSession(): void {
 }
 
 /**
- * Stages the drawdown scenario by overriding equity below the high-water mark.
- * Used only by the demo scenario runner.
+ * Stages the drawdown scenario by raising the intraday high-water mark above
+ * current equity, so the account shows a real drawdown from a real balance.
+ *
+ * Deliberately not an equity override: replacing the balance would show a
+ * fabricated figure for a connected account and feed it to the risk engine for
+ * the rest of the session. Raising the mark uses the same field the breaker
+ * really measures against, and current equity stays whatever the venue says.
  */
-export function stageDrawdown(peakEquity: number, currentEquity: number): void {
+export function stageDrawdownFromPeak(currentEquity: number, breachPct: number): void {
   const s = getSession();
-  s.state.peakEquityToday = peakEquity;
-  s.state.equityOverride = currentEquity;
+  const breach = Math.min(Math.max(breachPct, 0), 0.9);
+  s.state.peakEquityToday = currentEquity / (1 - breach);
+  // Any override left by an earlier run is cleared, so equity reads true.
+  s.state.equityOverride = undefined;
 }
 
 /**

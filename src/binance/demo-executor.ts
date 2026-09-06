@@ -167,7 +167,10 @@ export class DemoExecutor implements TradingExecutor {
       });
     } else {
       const existing = this.portfolio.positions[idx];
-      const existingQty = (existing.side === "LONG" ? 1 : -1) * (existing.notional / existing.markPrice);
+      // A seeded position carries a zero mark until its first live refresh;
+      // dividing by it would put NaN into the portfolio permanently.
+      const basePrice = existing.markPrice > 0 ? existing.markPrice : fillPrice;
+      const existingQty = (existing.side === "LONG" ? 1 : -1) * (existing.notional / basePrice);
       const netQty = existingQty + signedQty;
 
       if (Math.abs(netQty) < 1e-9) {

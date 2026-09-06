@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import type { AppState, Stage } from "@/ui/types";
 import { pct, usd } from "@/ui/types";
 import { Dot, Label, Status } from "./primitives";
@@ -23,6 +24,57 @@ export function Wordmark({ size = "md" }: { size?: "sm" | "md" }) {
 }
 
 /**
+ * The three destinations, in the order someone meets them.
+ *
+ * `match` is the pathname that marks an item current. "How it works" is a
+ * section of the overview rather than a page of its own, so it has none: it
+ * navigates without ever claiming to be the current page.
+ */
+const NAV = [
+  { href: "/", label: "Overview", match: "/" },
+  { href: "/#how-it-works", label: "How it works" },
+  { href: "/agents", label: "Agents", match: "/agents" },
+] as const;
+
+/**
+ * Primary navigation.
+ *
+ * Collapses to a horizontally scrollable row on narrow screens rather than a
+ * hamburger: three items do not justify a disclosure, and a menu that hides
+ * the agent surface would defeat the point of advertising it.
+ */
+function Nav() {
+  const pathname = usePathname();
+
+  return (
+    <nav className="flex items-center gap-1 overflow-x-auto">
+      {NAV.map((item) => {
+        const active =
+          "match" in item && item.match !== undefined
+            ? item.match === "/"
+              ? pathname === "/"
+              : pathname.startsWith(item.match)
+            : false;
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            aria-current={active ? "page" : undefined}
+            className={`shrink-0 border-b-2 px-2.5 py-[7px] font-mono text-[11px] uppercase tracking-label transition-colors ${
+              active
+                ? "border-accent text-ink"
+                : "border-transparent text-mute hover:text-ink"
+            }`}
+          >
+            {item.label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+/**
  * Shared masthead. The landing page passes no state and a CTA into the
  * console; the console passes live state and a link back to the overview.
  */
@@ -39,15 +91,18 @@ export function TopBar({
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-canvas/85 backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1560px] items-center gap-4 px-4 sm:px-6">
-        <Link href="/" className="flex items-center gap-3">
-          <Wordmark />
-          <span className="hidden h-3.5 w-px bg-line sm:block" />
-          <span className="hidden font-mono text-[11px] uppercase tracking-label text-mute sm:block">
-            AI Trading Risk Control
-          </span>
-        </Link>
+        {/* Equal-weight flanks, so the nav sits centred in the header rather
+            than merely after the wordmark. Both sides may shrink, which keeps
+            the centre honest once the status chip appears. */}
+        <div className="flex min-w-0 flex-1 items-center">
+          <Link href="/" className="flex items-center">
+            <Wordmark />
+          </Link>
+        </div>
 
-        <div className="ml-auto flex items-center gap-2 sm:gap-3">
+        <Nav />
+
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:gap-3">
           {demo ? (
             <span
               title={connection?.detail}

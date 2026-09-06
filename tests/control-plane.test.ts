@@ -237,6 +237,152 @@ describe("control plane execution gating", () => {
   });
 });
 
+/**
+ * Concurrency. Risk is evaluated against state read before the order goes out,
+ * so overlapping submissions must not each measure the pre-trade portfolio.
+ */
+describe("concurrent submissions", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** Executor whose fill lands only after an exchange round trip. */
+  class SlowExecutor implements TradingExecutor {
+    readonly venue = "DEMO" as const;
+    positions: Position[] = [];
+    calls = 0;
+    async describeConnection() {
+      return { connected: false, label: "Spy", detail: "test double" };
+    }
+    async getAccountState(): Promise<AccountState> {
+      return healthyAccount;
+    }
+    async getPositions() {
+      return this.positions.map((p) => ({ ...p }));
+    }
+    async getMarketData(symbol: string): Promise<MarketState> {
+      return {
+        symbol,
+        price: 68000,
+        priceChangePercent: 0,
+        source: "BINANCE_PUBLIC",
+        venueMaxLeverage: 125,
+        fetchedAt: 0,
+      };
+    }
+    async executeTrade(t: ApprovedTrade): Promise<ExecutionResult> {
+      this.calls++;
+      await sleep(20);
+      this.positions = [
+        {
+          symbol: t.symbol,
+          side: "LONG",
+          notional: (this.positions[0]?.notional ?? 0) + t.notional,
+          entryPrice: 68000,
+          markPrice: 68000,
+          leverage: t.leverage,
+          unrealizedPnl: 0,
+        },
+      ];
+      return { ok: true, venue: "DEMO", simulated: true, message: "filled" };
+    }
+  }
+
+  /** $1,900 twice would be $3,800 against a $2,000 per-symbol cap. */
+  const half = { ...safeTrade, notional: 1900 };
+
+  function slowPlane() {
+    const executor = new SlowExecutor();
+    const state: ControlPlaneState = {
+      policy: { ...DEFAULT_POLICY },
+      history: [],
+      halted: false,
+      peakEquityToday: healthyAccount.peakEquityToday,
+    };
+    return { executor, cp: new ControlPlane(state, executor, ["BTCUSDT"]) };
+  }
+
+  it("a proposal arriving mid-execution is measured against the finished trade", async () => {
+    const { cp, executor } = slowPlane();
+    const first = cp.submitProposal(half);
+    await sleep(5);
+    const second = cp.submitProposal(half);
+    const [a, b] = await Promise.all([first, second]);
+
+    expect([a.decision, b.decision].sort()).toEqual(["ALLOW", "BLOCK"]);
+    expect(executor.calls).toBe(1);
+    expect(executor.positions[0].notional).toBe(1900);
+  });
+
+  it("simultaneous duplicate submissions execute exactly once", async () => {
+    const { cp, executor } = slowPlane();
+    const results = await Promise.all([
+      cp.submitProposal(half),
+      cp.submitProposal(half),
+      cp.submitProposal(half),
+    ]);
+    expect(results.filter((r) => r.executed)).toHaveLength(1);
+    expect(executor.calls).toBe(1);
+  });
+
+  it("a failing submission does not stall the ones behind it", async () => {
+    const { cp, executor } = slowPlane();
+    executor.executeTrade = (async () => {
+      throw new Error("venue exploded");
+    }) as unknown as typeof executor.executeTrade;
+
+    await expect(cp.submitProposal(safeTrade)).rejects.toThrow("venue exploded");
+    const after = await cp.submitProposal({ ...safeTrade, leverage: 10 });
+    expect(after.decision).toBe("BLOCK");
+  });
+});
+
+describe("execution failure reporting", () => {
+  it("reports an allowed trade the venue rejected as not executed", async () => {
+    const state: ControlPlaneState = {
+      policy: { ...DEFAULT_POLICY },
+      history: [],
+      halted: false,
+      peakEquityToday: healthyAccount.peakEquityToday,
+    };
+    const executor = new SpyExecutor(healthyAccount);
+    executor.executeTrade = vi.fn(async () => ({
+      ok: false,
+      venue: "DEMO" as const,
+      simulated: true,
+      message: "Binance rejected the order.",
+    }));
+    const cp = new ControlPlane(state, executor, ["BTCUSDT"]);
+
+    const result = await cp.submitProposal(safeTrade);
+    expect(result.decision).toBe("ALLOW");
+    expect(result.executed).toBe(false);
+    expect(result.record.execution?.ok).toBe(false);
+  });
+});
+
+describe("unreadable account state", () => {
+  it("never poisons the high-water mark with an unreadable equity reading", async () => {
+    const broken = { ...healthyAccount, equity: NaN };
+    const { state, cp } = build(broken);
+    state.peakEquityToday = 10000;
+
+    const account = await cp.getAccountState();
+    expect(account.peakEquityToday).toBe(10000);
+
+    // The mark survives, so the breaker still works once equity reads again.
+    state.equityOverride = 9000;
+    const recovered = await cp.getAccountState();
+    expect(recovered.peakEquityToday).toBe(10000);
+    expect(recovered.tradingHalted).toBe(true);
+  });
+
+  it("refuses to execute while equity is unreadable", async () => {
+    const { cp, executor } = build({ ...healthyAccount, equity: NaN });
+    const result = await cp.submitProposal(safeTrade);
+    expect(result.decision).toBe("BLOCK");
+    expect(executor.executeTrade).not.toHaveBeenCalled();
+  });
+});
+
 describe("risk-sensitive settings changes", () => {
   it("refuses a leverage change that breaches policy", async () => {
     const { cp } = build(healthyAccount);
