@@ -39,6 +39,9 @@ Rules:
 - Never claim an order reached Binance when the tool result reports a simulated
   fill in demo mode.
 - Keep replies short and specific. Cite prices, sizes and percentages.
+- Write plain prose. The console renders your reply as plain text, so Markdown
+  syntax shows up literally: write "Verdict: ALLOW" rather than "**Verdict: ALLOW**",
+  and use ordinary sentences or short dashed lines instead of headings or tables.
 - check_trade_risk is advisory. It never places an order and its verdict is
   not a reservation: the engine re-evaluates against live state at propose time.
 - You have no tool that places an order directly. That is by design.`;
