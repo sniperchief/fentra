@@ -4,6 +4,8 @@
 
 Built for the Binance Agent OS Mini Hackathon — Track A.
 
+**Live demo → https://fentra-production.up.railway.app/app** (nothing to install)
+
 > The AI can propose any trade it likes. It cannot execute one that breaks your risk rules.
 
 ---
@@ -25,7 +27,16 @@ exchange.
 
 ---
 
-## Quick start
+## Try it
+
+### Option 1 — the live demo
+
+**https://fentra-production.up.railway.app/app**
+
+Connected to a Binance futures testnet account, so approved trades place real orders on the testnet
+and you can see the fills. No real money is involved.
+
+### Option 2 — run it yourself
 
 Requires Node 20 or newer.
 
@@ -41,6 +52,10 @@ Open **http://localhost:3000/app**
 **No API keys needed.** With nothing configured, Fentra runs in Demo Mode: real Binance prices, a
 starting balance of $10,482, and simulated fills that are clearly labelled as simulated. Nothing is
 sent to any exchange.
+
+The two differ only in where orders go. The risk engine, the rules and the verdicts are identical —
+the balances on screen will differ, because the live demo shows a real testnet account and a local
+run shows the seeded one.
 
 ### What to try
 
