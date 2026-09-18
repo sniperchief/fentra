@@ -90,8 +90,8 @@ function MenuIcon({ open }: { open: boolean }) {
  *
  * Desktop shows everything inline. Below `md` the header carries only the
  * wordmark and a menu button, and every link, the CTA and the venue status
- * move into a panel that drops down beneath it. The header is sticky, so the
- * menu is reachable from anywhere on the page.
+ * move into a menu that fills the screen beneath it. The header is sticky, so
+ * the menu is reachable from anywhere on the page.
  */
 export function TopBar({
   state = null,
@@ -108,6 +108,15 @@ export function TopBar({
   // Close on navigation. A link to `/#how-it-works` does not change the
   // pathname when already on `/`, so the links also close the menu on click.
   useEffect(() => setOpen(false), [pathname]);
+
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -177,9 +186,9 @@ export function TopBar({
       {open ? (
         <div
           id="mobile-menu"
-          className="absolute inset-x-0 top-full border-b border-line bg-canvas shadow-[0_12px_24px_-12px_rgba(0,0,0,0.18)] md:hidden"
+          className="absolute inset-x-0 top-full flex h-[calc(100dvh-3.5rem)] flex-col overflow-y-auto bg-canvas md:hidden"
         >
-          <nav className="flex flex-col px-4 py-2">
+          <nav className="flex flex-col px-5 pt-2">
             {NAV.map((item) => {
               const active = isActive(item, pathname);
               return (
@@ -188,18 +197,18 @@ export function TopBar({
                   href={item.href}
                   onClick={() => setOpen(false)}
                   aria-current={active ? "page" : undefined}
-                  className={`flex items-center justify-between border-b border-hair py-3.5 font-mono text-[12.5px] uppercase tracking-label ${
+                  className={`flex items-center justify-between border-b border-hair py-5 font-mono text-[15px] uppercase tracking-label ${
                     active ? "text-ink" : "text-mute"
                   }`}
                 >
                   {item.label}
-                  {active ? <span aria-hidden className="h-[6px] w-[6px] bg-accent" /> : null}
+                  {active ? <span aria-hidden className="h-[7px] w-[7px] bg-accent" /> : null}
                 </Link>
               );
             })}
           </nav>
 
-          <div className="space-y-3 px-4 pb-4 pt-2">
+          <div className="mt-auto space-y-4 border-t border-line px-5 pb-8 pt-5">
             {connection ? (
               <div
                 title={connection.detail}
@@ -212,7 +221,7 @@ export function TopBar({
             <Link
               href={cta.href}
               onClick={() => setOpen(false)}
-              className={`block border px-4 py-3 text-center font-mono text-[11.5px] uppercase tracking-label transition-colors ${ctaClass}`}
+              className={`block border px-4 py-4 text-center font-mono text-[12.5px] uppercase tracking-label transition-colors ${ctaClass}`}
             >
               {cta.label}
             </Link>
