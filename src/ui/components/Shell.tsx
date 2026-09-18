@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import type { AppState, Stage } from "@/ui/types";
 import { pct, usd } from "@/ui/types";
 import { Dot, Label, Status } from "./primitives";
@@ -36,25 +37,21 @@ const NAV = [
   { href: "/agents", label: "Agents", match: "/agents" },
 ] as const;
 
-/**
- * Primary navigation.
- *
- * Collapses to a horizontally scrollable row on narrow screens rather than a
- * hamburger: three items do not justify a disclosure, and a menu that hides
- * the agent surface would defeat the point of advertising it.
- */
+type NavItem = (typeof NAV)[number];
+
+function isActive(item: NavItem, pathname: string): boolean {
+  if (!("match" in item)) return false;
+  return item.match === "/" ? pathname === "/" : pathname.startsWith(item.match);
+}
+
+/** Inline desktop navigation. Hidden below `md`, where the menu takes over. */
 function Nav() {
   const pathname = usePathname();
 
   return (
-    <nav className="flex items-center gap-1 overflow-x-auto">
+    <nav className="hidden items-center gap-1 md:flex">
       {NAV.map((item) => {
-        const active =
-          "match" in item && item.match !== undefined
-            ? item.match === "/"
-              ? pathname === "/"
-              : pathname.startsWith(item.match)
-            : false;
+        const active = isActive(item, pathname);
         return (
           <Link
             key={item.href}
@@ -74,9 +71,27 @@ function Nav() {
   );
 }
 
+/** Two-state icon: three bars when closed, a cross when open. */
+function MenuIcon({ open }: { open: boolean }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      {open ? (
+        <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      ) : (
+        <path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      )}
+    </svg>
+  );
+}
+
 /**
  * Shared masthead. The landing page passes no state and a CTA into the
  * console; the console passes live state and a link back to the overview.
+ *
+ * Desktop shows everything inline. Below `md` the header carries only the
+ * wordmark and a menu button, and every link, the CTA and the venue status
+ * move into a panel that drops down beneath it. The header is sticky, so the
+ * menu is reachable from anywhere on the page.
  */
 export function TopBar({
   state = null,
@@ -85,28 +100,47 @@ export function TopBar({
   state?: AppState | null;
   cta: { label: string; href: string; primary?: boolean };
 }) {
+  const pathname = usePathname();
+  const [open, setOpen] = useState(false);
   const connection = state?.connection;
   const demo = connection?.venue === "DEMO";
+
+  // Close on navigation. A link to `/#how-it-works` does not change the
+  // pathname when already on `/`, so the links also close the menu on click.
+  useEffect(() => setOpen(false), [pathname]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const ctaClass =
+    cta.primary === false
+      ? "border-line bg-paper text-ink/70 hover:border-ink/40 hover:text-ink"
+      : "border-ink bg-ink text-white hover:bg-ink/85";
 
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-canvas/85 backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1560px] items-center gap-4 px-4 sm:px-6">
-        {/* Equal-weight flanks, so the nav sits centred in the header rather
-            than merely after the wordmark. Both sides may shrink, which keeps
-            the centre honest once the status chip appears. */}
+        {/* Equal-weight flanks on desktop, so the nav sits centred in the
+            header rather than merely after the wordmark. */}
         <div className="flex min-w-0 flex-1 items-center">
-          <Link href="/" className="flex items-center">
+          <Link href="/" className="flex shrink-0 items-center">
             <Wordmark />
           </Link>
         </div>
 
         <Nav />
 
-        <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:gap-3">
+        <div className="hidden min-w-0 flex-1 items-center justify-end gap-3 md:flex">
           {demo ? (
             <span
               title={connection?.detail}
-              className="hidden border border-line px-2 py-[5px] font-mono text-[10.5px] uppercase tracking-label text-mute sm:inline"
+              className="border border-line px-2 py-[5px] font-mono text-[10.5px] uppercase tracking-label text-mute"
             >
               Demo mode
             </span>
@@ -114,24 +148,77 @@ export function TopBar({
           {connection ? (
             <span
               title={connection.detail}
-              className="flex items-center gap-1.5 border border-line bg-paper px-2.5 py-[7px] font-mono text-[11px] uppercase tracking-label text-ink/70 sm:py-[5px]"
+              className="flex items-center gap-1.5 border border-line bg-paper px-2.5 py-[5px] font-mono text-[11px] uppercase tracking-label text-ink/70"
             >
               <Dot tone={connection.connected ? "ok" : demo ? "neutral" : "warn"} pulse />
-              <span className="hidden sm:inline">{connection.label}</span>
+              <span>{connection.label}</span>
             </span>
           ) : null}
           <Link
             href={cta.href}
-            className={`border px-4 py-2 font-mono text-[11px] uppercase tracking-label transition-colors ${
-              cta.primary === false
-                ? "border-line bg-paper text-ink/70 hover:border-ink/40 hover:text-ink"
-                : "border-ink bg-ink text-white hover:bg-ink/85"
-            }`}
+            className={`border px-4 py-2 font-mono text-[11px] uppercase tracking-label transition-colors ${ctaClass}`}
           >
             {cta.label}
           </Link>
         </div>
+
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-controls="mobile-menu"
+          aria-label={open ? "Close menu" : "Open menu"}
+          className="-mr-2 flex h-11 w-11 shrink-0 items-center justify-center text-ink md:hidden"
+        >
+          <MenuIcon open={open} />
+        </button>
       </div>
+
+      {open ? (
+        <div
+          id="mobile-menu"
+          className="absolute inset-x-0 top-full border-b border-line bg-canvas shadow-[0_12px_24px_-12px_rgba(0,0,0,0.18)] md:hidden"
+        >
+          <nav className="flex flex-col px-4 py-2">
+            {NAV.map((item) => {
+              const active = isActive(item, pathname);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onClick={() => setOpen(false)}
+                  aria-current={active ? "page" : undefined}
+                  className={`flex items-center justify-between border-b border-hair py-3.5 font-mono text-[12.5px] uppercase tracking-label ${
+                    active ? "text-ink" : "text-mute"
+                  }`}
+                >
+                  {item.label}
+                  {active ? <span aria-hidden className="h-[6px] w-[6px] bg-accent" /> : null}
+                </Link>
+              );
+            })}
+          </nav>
+
+          <div className="space-y-3 px-4 pb-4 pt-2">
+            {connection ? (
+              <div
+                title={connection.detail}
+                className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-label text-ink/70"
+              >
+                <Dot tone={connection.connected ? "ok" : demo ? "neutral" : "warn"} pulse />
+                {connection.label}
+              </div>
+            ) : null}
+            <Link
+              href={cta.href}
+              onClick={() => setOpen(false)}
+              className={`block border px-4 py-3 text-center font-mono text-[11.5px] uppercase tracking-label transition-colors ${ctaClass}`}
+            >
+              {cta.label}
+            </Link>
+          </div>
+        </div>
+      ) : null}
     </header>
   );
 }
